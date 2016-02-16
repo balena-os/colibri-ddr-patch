@@ -1,6 +1,14 @@
+#define _GNU_SOURCE
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <malloc.h>
 
 #define ARCH_DMA_MINALIGN 64
 #define BLOCK_SIZE 1024
@@ -37,14 +45,101 @@ int is_mx6dl() {
 
 }
 
-// To-Do: read the IVT from eMMC
-int read_block(){
-	return 0;
+// Stolen from the dd source code http://code.metager.de/source/xref/linux/klibc/usr/utils/dd.c
+int safe_read(int fd, void *buf, size_t size)
+{
+	int ret, count = 0;
+	char *p = buf;
+
+	while (size) {
+		ret = read(fd, p, size);
+
+		/*
+		 * If we got EINTR, go again.
+		 */
+		if (ret == -1 && errno == EINTR)
+			continue;
+
+		/*
+		 * If we encountered an error condition
+		 * or read 0 bytes (EOF) return what we
+		 * have.
+		 */
+		if (ret == -1 || ret == 0)
+			return count ? count : ret;
+
+		/*
+		 * We read some bytes.
+		 */
+		count += ret;
+		size -= ret;
+		p += ret;
+	}
+
+	return count;
 }
 
-// To-Do: write the IVT to eMMC
-int write_block(){
+// Also from dd source
+int skip_blocks(int fd, void *buf, unsigned int blks, size_t size)
+{
+	unsigned int blk;
+	int ret = 0;
+
+	/*
+	 * Try to seek.
+	 */
+	for (blk = 0; blk < blks; blk++) {
+		ret = lseek(fd, size, SEEK_CUR);
+		if (ret == -1)
+			break;
+	}
+
+	/*
+	 * If we failed to seek, read instead.
+	 * FIXME: we don't handle short reads here, or
+	 * EINTR correctly.
+	 */
+	if (blk == 0 && ret == -1 && errno == ESPIPE) {
+		for (blk = 0; blk < blks; blk++) {
+			ret = safe_read(fd, buf, size);
+			if (ret != (int)size)
+				break;
+		}
+	}
+
+	if (ret == -1) {
+		return -1;
+	}
 	return 0;
+}
+// read the IVT from eMMC
+int read_block(char *ivt){
+	int ret = 0;
+	int d = open(MMC_DEVICE, O_RDONLY);
+	if(d == -1) {
+		return -1;
+	}
+	if((skip_blocks(d, ivt, 1, BLOCK_SIZE) != 0) || (safe_read(d, ivt, BLOCK_SIZE) != (int)BLOCK_SIZE)){
+		ret = -1;
+	}
+
+	close(d);
+	return ret;
+}
+
+// write the IVT to eMMC
+int write_block(char *ivt){
+	int ret = 0;
+	int d = open(MMC_DEVICE, O_WRONLY|O_DIRECT|O_SYNC);
+	if(d == -1) {
+		return -1;
+	}
+	if((skip_blocks(d, ivt, 1, BLOCK_SIZE) != 0) || (write(d, ivt, BLOCK_SIZE) != (int)BLOCK_SIZE)){
+		ret = -1;
+	}
+
+	close(d);
+	return ret;
 }
 
 int apply_patch(){
